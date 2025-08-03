@@ -1,131 +1,154 @@
 import os
-import shutil
+import sys
 import zipfile
 import time
 from datetime import datetime
 
-def create_jar_from_folder(folder_path, output_jar_path):
-    """
-    Создает JAR-файл из указанной папки
-    """
+def check_storage_permission():
+    """Проверяем разрешения на доступ к хранилищу"""
+    if not os.path.exists('/sdcard'):
+        print("\n[!] Termux не имеет доступа к хранилищу!")
+        print("Выполните следующие команды:")
+        print("1. termux-setup-storage")
+        print("2. Разрешите доступ к файлам")
+        return False
+    return True
+
+def create_manifest(folder_path):
+    """Создает MANIFEST.MF если его нет"""
+    meta_inf = os.path.join(folder_path, "META-INF")
+    os.makedirs(meta_inf, exist_ok=True)
+    
+    manifest_path = os.path.join(meta_inf, "MANIFEST.MF")
+    if not os.path.exists(manifest_path):
+        with open(manifest_path, 'w') as f:
+            f.write("Manifest-Version: 1.0\n")
+            f.write("Created-By: Termux JAR Converter\n")
+            f.write("Main-Class: Main\n")  # Можно указать главный класс
+
+def validate_paths(folder_path, jar_path):
+    """Проверяет корректность путей"""
+    if not os.path.isdir(folder_path):
+        raise ValueError(f"Папка не существует: {folder_path}")
+    
+    if os.path.commonpath([folder_path]) == os.path.commonpath([folder_path, jar_path]):
+        raise ValueError("JAR файл не может находиться внутри конвертируемой папки")
+
+def create_jar(folder_path, jar_path):
+    """Основная функция создания JAR"""
     try:
-        # Создаем временную папку для манифеста
-        temp_dir = os.path.join(folder_path, "META-INF")
-        os.makedirs(temp_dir, exist_ok=True)
+        print(f"\n[+] Создаю JAR из: {folder_path}")
+        print(f"[+] Сохраняю как: {jar_path}")
         
-        # Создаем простой манифест, если его нет
-        manifest_path = os.path.join(temp_dir, "MANIFEST.MF")
-        if not os.path.exists(manifest_path):
-            with open(manifest_path, "w") as f:
-                f.write("Manifest-Version: 1.0\nCreated-By: FolderToJAR Converter\n")
+        validate_paths(folder_path, jar_path)
+        create_manifest(folder_path)
         
-        # Создаем JAR-файл (по сути ZIP с другой расширением)
-        with zipfile.ZipFile(output_jar_path, 'w', zipfile.ZIP_DEFLATED) as jar:
+        start_time = time.time()
+        
+        with zipfile.ZipFile(jar_path, 'w', zipfile.ZIP_DEFLATED) as jar:
             for root, dirs, files in os.walk(folder_path):
                 for file in files:
-                    file_path = os.path.join(root, file)
-                    # Исключаем сам создаваемый JAR-файл
-                    if file_path != output_jar_path:
-                        arcname = os.path.relpath(file_path, folder_path)
-                        jar.write(file_path, arcname)
+                    full_path = os.path.join(root, file)
+                    if full_path == jar_path:
+                        continue
+                    
+                    rel_path = os.path.relpath(full_path, folder_path)
+                    jar.write(full_path, rel_path)
+                    print(f"Добавлен: {rel_path}")
         
-        print(f"\nУспешно создан JAR-файл: {output_jar_path}")
+        size = os.path.getsize(jar_path) / (1024 * 1024)
+        print(f"\n[+] Успешно! Размер JAR: {size:.2f} MB")
+        print(f"[+] Время создания: {time.time() - start_time:.2f} сек")
         return True
     
     except Exception as e:
-        print(f"\nОшибка при создании JAR-файла: {e}")
+        print(f"\n[!] Ошибка: {str(e)}")
         return False
 
-def monitor_and_update(folder_path, jar_path, interval=5):
-    """
-    Мониторит изменения в папке и обновляет JAR-файл
-    """
-    print(f"\nМониторинг папки: {folder_path}")
-    print(f"JAR-файл будет обновляться автоматически каждые {interval} секунд")
-    print("Нажмите Ctrl+C для выхода...\n")
+def monitor_changes(folder_path, jar_path, interval=5):
+    """Мониторит изменения и обновляет JAR"""
+    print(f"\n[+] Запущен мониторинг: {folder_path}")
+    print("[+] Нажмите Ctrl+C для остановки")
     
-    # Словарь для хранения времени последнего изменения файлов
-    last_modified = {}
+    last_state = {}
     
-    # Инициализация словаря
-    for root, dirs, files in os.walk(folder_path):
+    # Первоначальное сканирование
+    for root, _, files in os.walk(folder_path):
         for file in files:
-            file_path = os.path.join(root, file)
-            last_modified[file_path] = os.path.getmtime(file_path)
+            path = os.path.join(root, file)
+            last_state[path] = os.path.getmtime(path)
     
     try:
         while True:
-            updated = False
+            changed = False
             
-            # Проверка изменений в существующих файлах
-            for file_path in list(last_modified.keys()):
-                if not os.path.exists(file_path):
-                    # Файл был удален
-                    del last_modified[file_path]
-                    updated = True
-                    print(f"Файл удален: {file_path}")
-                else:
-                    current_mtime = os.path.getmtime(file_path)
-                    if current_mtime > last_modified[file_path]:
-                        # Файл был изменен
-                        last_modified[file_path] = current_mtime
-                        updated = True
-                        print(f"Файл изменен: {file_path}")
-            
-            # Проверка новых файлов
-            for root, dirs, files in os.walk(folder_path):
+            # Проверка изменений
+            current_state = {}
+            for root, _, files in os.walk(folder_path):
                 for file in files:
-                    file_path = os.path.join(root, file)
-                    if file_path not in last_modified and file_path != jar_path:
-                        last_modified[file_path] = os.path.getmtime(file_path)
-                        updated = True
-                        print(f"Новый файл: {file_path}")
+                    path = os.path.join(root, file)
+                    if path == jar_path:
+                        continue
+                    
+                    current_state[path] = os.path.getmtime(path)
+                    if path not in last_state or current_state[path] != last_state[path]:
+                        print(f"Обнаружено изменение: {path}")
+                        changed = True
             
-            # Если были изменения, обновляем JAR
-            if updated:
-                if create_jar_from_folder(folder_path, jar_path):
-                    print(f"JAR обновлен: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            # Проверка удаленных файлов
+            for path in list(last_state.keys()):
+                if path not in current_state:
+                    print(f"Файл удален: {path}")
+                    changed = True
+            
+            if changed:
+                print("\n[+] Обнаружены изменения, пересоздаю JAR...")
+                if create_jar(folder_path, jar_path):
+                    print(f"[+] JAR обновлен: {datetime.now().strftime('%H:%M:%S')}")
                 else:
-                    print("Ошибка при обновлении JAR")
+                    print("[!] Не удалось обновить JAR")
+                
+                last_state = current_state
             
             time.sleep(interval)
     
     except KeyboardInterrupt:
-        print("\nМониторинг остановлен.")
+        print("\n[+] Мониторинг остановлен")
 
 def main():
-    print("=== Folder to JAR Converter for Termux ===")
+    print("\n=== Termux Folder to JAR Converter ===")
+    print("=== Полная версия с мониторингом ===\n")
     
-    # Запрос пути к папке
-    folder_path = input("Введите путь к папке для конвертации: ").strip()
+    if not check_storage_permission():
+        sys.exit(1)
     
-    # Проверка существования папки
-    if not os.path.isdir(folder_path):
-        print(f"Ошибка: Папка '{folder_path}' не существует!")
-        return
+    # Ввод путей
+    folder_path = input("Введите путь к папке: ").strip()
+    jar_name = input("Введите имя JAR (по умолчанию output.jar): ").strip() or "output.jar"
     
-    # Определение имени JAR-файла
-    folder_name = os.path.basename(os.path.normpath(folder_path))
-    default_jar_name = f"{folder_name}.jar"
-    jar_path = input(f"Введите путь для JAR-файла (по умолчанию {default_jar_name}): ").strip()
+    # Автоматическое определение пути для сохранения
+    if not os.path.isabs(jar_name):
+        jar_path = os.path.join(os.getcwd(), jar_name)
+    else:
+        jar_path = jar_name
     
-    if not jar_path:
-        jar_path = default_jar_name
-    
-    # Создание начального JAR-файла
-    if not create_jar_from_folder(folder_path, jar_path):
-        return
+    # Создание JAR
+    if not create_jar(folder_path, jar_path):
+        sys.exit(1)
     
     # Запуск мониторинга
-    monitor_and_update(folder_path, jar_path)
+    monitor = input("\nЗапустить мониторинг изменений? (y/n): ").lower()
+    if monitor == 'y':
+        monitor_changes(folder_path, jar_path)
+    else:
+        print("\n[+] Готово! JAR файл создан.")
 
 if __name__ == "__main__":
-    # Проверка наличия необходимых модулей
+    # Проверка зависимостей
     try:
         import zipfile
     except ImportError:
-        print("Ошибка: Необходимо установить модуль zipfile.")
-        print("Попробуйте выполнить: pkg install python")
-        exit(1)
+        print("[!] Установите zipfile: pip install zipfile")
+        sys.exit(1)
     
     main()
